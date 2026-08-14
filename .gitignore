@@ -1,0 +1,20 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Raw scraped dataset images are not committed (100+ MB, re-buildable via
+# scripts/build_dataset.py; data/manifest.csv records exactly what was used).
+data/raw/
+data/processed/
+
+# Keep the best checkpoint (small enough, useful for inference out of the box);
+# drop the "last epoch" checkpoint to save space.
+checkpoints/last_model.pt
+
+dataset_build.log
+*.log
+
+.vscode/
+.idea/
