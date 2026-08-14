@@ -79,7 +79,7 @@ def overlay_heatmap(orig_img: Image.Image, heatmap: np.ndarray, alpha: float = 0
     color[..., 0] = heatmap_u8  # R
     color[..., 1] = (heatmap_u8 * 0.4).astype(np.uint8)  # G
     color[..., 2] = 255 - heatmap_u8  # B
-    color_img = Image.fromarray(color, mode="RGB").resize(orig_img.size)
+    color_img = Image.fromarray(color).resize(orig_img.size)
     blended = Image.blend(orig_img.convert("RGB"), color_img, alpha=alpha)
     return blended
 

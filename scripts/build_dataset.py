@@ -47,17 +47,15 @@ THUMB_WIDTH = 512  # fetch a resized thumbnail directly from Commons to save ban
 MIN_SIDE = 150      # skip tiny icons/diagrams
 
 
-def list_category_files(category: str, limit: int) -> list[str]:
-    """Return up to `limit` file titles from a Commons category (files only)."""
+def _list_members(category: str, cmtype: str, limit: int, session: requests.Session) -> list[str]:
     titles: list[str] = []
     cmcontinue = None
-    session = requests.Session()
     while len(titles) < limit:
         params = {
             "action": "query",
             "list": "categorymembers",
             "cmtitle": f"Category:{category}",
-            "cmtype": "file",
+            "cmtype": cmtype,
             "cmlimit": min(50, limit - len(titles)),
             "format": "json",
         }
@@ -73,6 +71,51 @@ def list_category_files(category: str, limit: int) -> list[str]:
             break
         time.sleep(0.2)
     return titles[:limit]
+
+
+def list_category_files(category: str, limit: int) -> list[str]:
+    """Return up to `limit` file titles from a Commons category (files only)."""
+    session = requests.Session()
+    return _list_members(category, "file", limit, session)
+
+
+def list_category_files_recursive(
+    category: str, limit: int, max_depth: int = 2, max_subcats: int = 40
+) -> list[str]:
+    """Many Commons vehicle categories (e.g. "Category:Sedans") hold almost no
+    files directly -- the files live under subcategories like "by brand" ->
+    "<Manufacturer> <Model>". BFS through subcategories (bounded depth/fanout)
+    collecting file titles until `limit` is reached or the frontier is
+    exhausted.
+    """
+    session = requests.Session()
+    titles: list[str] = []
+    seen_cats: set[str] = {category}
+    frontier: list[tuple[str, int]] = [(category, 0)]
+
+    while frontier and len(titles) < limit:
+        cat, depth = frontier.pop(0)
+        direct = _list_members(cat, "file", limit - len(titles), session)
+        titles.extend(direct)
+        if len(titles) >= limit:
+            break
+        if depth >= max_depth:
+            continue
+        subcats = _list_members(cat, "subcat", max_subcats, session)
+        for sc in subcats:
+            name = sc.split(":", 1)[1] if ":" in sc else sc
+            if name not in seen_cats:
+                seen_cats.add(name)
+                frontier.append((name, depth + 1))
+
+    # de-duplicate while preserving order
+    seen = set()
+    unique = []
+    for t in titles:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique[:limit]
 
 
 def fetch_imageinfo(titles: list[str]) -> dict:
@@ -135,16 +178,22 @@ def build_class(
     target: int,
     out_dir: Path,
     manifest_rows: list[dict],
-) -> None:
+    start_index: int = 0,
+    existing_titles: set[str] | None = None,
+) -> int:
+    """Download up to `target` NEW images for this class, numbered starting at
+    `start_index` (so re-running to top up a class doesn't clobber existing
+    files). Returns the number of new images saved."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    per_cat = max(1, (target * 2) // len(categories))  # over-fetch, some will fail/filter
-    seen_titles: set[str] = set()
+    per_cat = max(20, (target * 3) // max(1, len(categories)))  # over-fetch, some will fail/filter
+    seen_titles: set[str] = set(existing_titles or set())
     n_saved = 0
+    idx = start_index
     for cat in categories:
         if n_saved >= target:
             break
         print(f"[{class_name}] category: {cat}")
-        titles = list_category_files(cat, per_cat)
+        titles = list_category_files_recursive(cat, per_cat)
         infos = fetch_imageinfo(titles)
         for title, info in infos.items():
             if n_saved >= target:
@@ -159,7 +208,7 @@ def build_class(
             if not url:
                 continue
             ext = ".jpg" if "jpeg" in mime else ".png"
-            fname = f"{class_name}_{n_saved:04d}{ext}"
+            fname = f"{class_name}_{idx:04d}{ext}"
             dest = out_dir / fname
             size = download_and_save(url, dest)
             if size is None:
@@ -186,9 +235,25 @@ def build_class(
                 }
             )
             n_saved += 1
+            idx += 1
             if n_saved % 20 == 0:
-                print(f"  ...{n_saved}/{target} saved")
-    print(f"[{class_name}] done: {n_saved}/{target} saved")
+                print(f"  ...{n_saved}/{target} new images saved")
+    print(f"[{class_name}] done: {n_saved}/{target} new images saved (next index {idx})")
+    return n_saved
+
+
+FIELDNAMES = [
+    "filename",
+    "class",
+    "wikimedia_title",
+    "source_url",
+    "image_url",
+    "license",
+    "artist",
+    "width",
+    "height",
+    "category",
+]
 
 
 def main():
@@ -196,44 +261,71 @@ def main():
     ap.add_argument("--target-per-class", type=int, default=200)
     ap.add_argument("--out-root", type=str, default="data/raw")
     ap.add_argument("--manifest", type=str, default="data/manifest.csv")
+    ap.add_argument(
+        "--classes",
+        type=str,
+        default="emergency,non_emergency",
+        help="comma-separated subset of classes to (re)fetch, e.g. 'non_emergency' to top up one class",
+    )
+    ap.add_argument(
+        "--top-up",
+        action="store_true",
+        help="append new images to an existing manifest/data dir instead of overwriting",
+    )
     args = ap.parse_args()
 
     root = Path(args.out_root)
-    manifest_rows: list[dict] = []
-
-    build_class(
-        "emergency",
-        POSITIVE_CATEGORIES,
-        args.target_per_class,
-        root / "emergency",
-        manifest_rows,
-    )
-    build_class(
-        "non_emergency",
-        NEGATIVE_CATEGORIES,
-        args.target_per_class,
-        root / "non_emergency",
-        manifest_rows,
-    )
-
     manifest_path = Path(args.manifest)
+    manifest_rows: list[dict] = []
+    existing_by_class: dict[str, tuple[int, set[str]]] = {}
+
+    if args.top_up and manifest_path.exists():
+        with open(manifest_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                manifest_rows.append(row)
+        for cls in ("emergency", "non_emergency"):
+            rows = [r for r in manifest_rows if r["class"] == cls]
+            titles = {r["wikimedia_title"] for r in rows}
+            max_idx = -1
+            for r in rows:
+                try:
+                    n = int(Path(r["filename"]).stem.rsplit("_", 1)[1])
+                    max_idx = max(max_idx, n)
+                except (IndexError, ValueError):
+                    pass
+            existing_by_class[cls] = (max_idx + 1, titles)
+
+    requested = set(args.classes.split(","))
+
+    if "emergency" in requested:
+        start_idx, existing_titles = existing_by_class.get("emergency", (0, set()))
+        needed = max(0, args.target_per_class - start_idx)
+        build_class(
+            "emergency",
+            POSITIVE_CATEGORIES,
+            needed,
+            root / "emergency",
+            manifest_rows,
+            start_index=start_idx,
+            existing_titles=existing_titles,
+        )
+    if "non_emergency" in requested:
+        start_idx, existing_titles = existing_by_class.get("non_emergency", (0, set()))
+        needed = max(0, args.target_per_class - start_idx)
+        build_class(
+            "non_emergency",
+            NEGATIVE_CATEGORIES,
+            needed,
+            root / "non_emergency",
+            manifest_rows,
+            start_index=start_idx,
+            existing_titles=existing_titles,
+        )
+
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with open(manifest_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "filename",
-                "class",
-                "wikimedia_title",
-                "source_url",
-                "image_url",
-                "license",
-                "artist",
-                "width",
-                "height",
-                "category",
-            ],
-        )
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(manifest_rows)
     print(f"Manifest written: {manifest_path} ({len(manifest_rows)} rows)")
