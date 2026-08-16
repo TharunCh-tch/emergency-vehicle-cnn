@@ -105,7 +105,10 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device)
     image_size = ckpt.get("image_size", 128)
     model = EmergencyVehicleCNN(
-        num_classes=2, image_size=image_size, dropout=ckpt.get("dropout", 0.4)
+        num_classes=2,
+        image_size=image_size,
+        dropout=ckpt.get("dropout", 0.4),
+        base_channels=ckpt.get("base_channels", 16),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()

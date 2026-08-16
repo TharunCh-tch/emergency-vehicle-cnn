@@ -28,6 +28,7 @@ class EmergencyVehicleCNN(nn.Module):
         image_size: int = 128,
         dropout: float = 0.4,
         in_channels: int = 3,
+        base_channels: int = 16,
     ) -> None:
         super().__init__()
         self.image_size = image_size
@@ -40,25 +41,31 @@ class EmergencyVehicleCNN(nn.Module):
                 nn.MaxPool2d(kernel_size=2, stride=2),
             )
 
-        # 4 conv layers, channel depth doubling each block
-        self.layer1 = conv_block(in_channels, 32)
-        self.layer2 = conv_block(32, 64)
-        self.layer3 = conv_block(64, 128)
-        self.layer4 = conv_block(128, 256)
+        # 4 conv layers, channel depth doubling each block. base_channels
+        # defaults to 16 (not the more typical 32) because this project's
+        # dataset is small (~300 images) -- a 32-base model (4.6M params)
+        # memorized the training set almost immediately (see results/results.md
+        # run history); a narrower network generalizes better on this little
+        # data without changing the 4-conv-block architecture shape.
+        c1, c2, c3, c4 = base_channels, base_channels * 2, base_channels * 4, base_channels * 8
+        self.layer1 = conv_block(in_channels, c1)
+        self.layer2 = conv_block(c1, c2)
+        self.layer3 = conv_block(c2, c3)
+        self.layer4 = conv_block(c3, c4)
 
         # after 4 stride-2 pools, spatial size is image_size / 16
         reduced = image_size // 16
         if reduced < 1:
             raise ValueError("image_size too small for 4 pooling layers")
-        flat_dim = 256 * reduced * reduced
+        flat_dim = c4 * reduced * reduced
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(dropout),
-            nn.Linear(flat_dim, 256),
+            nn.Linear(flat_dim, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(256, num_classes),
+            nn.Linear(128, num_classes),
         )
 
         # keep a handle on the last conv layer for Grad-CAM

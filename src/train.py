@@ -49,10 +49,19 @@ def main():
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--dropout", type=float, default=0.4)
+    ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--base-channels", type=int, default=16)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     ap.add_argument("--log-path", type=str, default="results/training_log.json")
     ap.add_argument("--num-workers", type=int, default=0)
+    ap.add_argument(
+        "--select-by",
+        type=str,
+        default="val_f1",
+        choices=["val_loss", "val_f1", "val_acc"],
+        help="metric used to pick the checkpoint saved as best_model.pt",
+    )
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -72,14 +81,20 @@ def main():
     )
 
     model = EmergencyVehicleCNN(
-        num_classes=2, image_size=args.image_size, dropout=args.dropout
+        num_classes=2,
+        image_size=args.image_size,
+        dropout=args.dropout,
+        base_channels=args.base_channels,
     ).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {n_params:,} (base_channels={args.base_channels})")
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_val_loss = float("inf")
+    # lower is better for val_loss, higher is better for val_f1/val_acc
+    best_metric = float("inf") if args.select_by == "val_loss" else float("-inf")
     history = []
 
     start = time.time()
@@ -126,32 +141,34 @@ def main():
             }
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "epoch": epoch,
-                    "val_loss": val_loss,
-                    "val_acc": val_metrics.accuracy,
-                    "image_size": args.image_size,
-                    "dropout": args.dropout,
-                },
-                ckpt_dir / "best_model.pt",
-            )
-            print(f"  -> new best checkpoint saved (val_loss={val_loss:.4f})")
+        current_metric = {
+            "val_loss": val_loss,
+            "val_f1": val_metrics.f1,
+            "val_acc": val_metrics.accuracy,
+        }[args.select_by]
+        is_better = (
+            current_metric < best_metric
+            if args.select_by == "val_loss"
+            else current_metric > best_metric
+        )
+        ckpt_payload = {
+            "model_state_dict": model.state_dict(),
+            "epoch": epoch,
+            "val_loss": val_loss,
+            "val_acc": val_metrics.accuracy,
+            "val_f1": val_metrics.f1,
+            "image_size": args.image_size,
+            "dropout": args.dropout,
+            "base_channels": args.base_channels,
+            "select_by": args.select_by,
+        }
+        if is_better:
+            best_metric = current_metric
+            torch.save(ckpt_payload, ckpt_dir / "best_model.pt")
+            print(f"  -> new best checkpoint saved ({args.select_by}={current_metric:.4f})")
 
         # always keep the latest checkpoint too
-        torch.save(
-            {
-                "model_state_dict": model.state_dict(),
-                "epoch": epoch,
-                "val_loss": val_loss,
-                "image_size": args.image_size,
-                "dropout": args.dropout,
-            },
-            ckpt_dir / "last_model.pt",
-        )
+        torch.save(ckpt_payload, ckpt_dir / "last_model.pt")
 
     elapsed = time.time() - start
     print(f"Training complete in {elapsed:.1f}s ({elapsed/60:.2f} min)")

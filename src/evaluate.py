@@ -27,6 +27,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[EmergencyVe
         num_classes=2,
         image_size=ckpt.get("image_size", 128),
         dropout=ckpt.get("dropout", 0.4),
+        base_channels=ckpt.get("base_channels", 16),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -105,7 +106,8 @@ Kaggle/GPU coursework project.**
 
 - Device: CPU (no GPU on this machine)
 - Image resolution: {image_size}x{image_size}
-- Checkpoint: `{args.checkpoint}` (best val-loss epoch: {ckpt.get('epoch')})
+- Checkpoint: `{args.checkpoint}` (epoch {ckpt.get('epoch')}, selected by best `{ckpt.get('select_by', 'val_loss')}`: val_loss={ckpt.get('val_loss'):.4f}, val_acc={ckpt.get('val_acc', 0):.4f}, val_f1={ckpt.get('val_f1', 0):.4f})
+- Model: EmergencyVehicleCNN, base_channels={ckpt.get('base_channels', 16)}, dropout={ckpt.get('dropout')}
 - Train / val / test sizes: {training_meta.get('train_size')} / {training_meta.get('val_size')} / {len(test_ds)}
 - Epochs trained: {len(training_meta.get('history', []))}
 - Training wall-clock time: {training_meta.get('elapsed_seconds', 0):.1f}s
@@ -130,15 +132,31 @@ Rows = true label, columns = predicted label. Class order: `{CLASS_NAMES}`
 | True: non_emergency | {cm[0][0]} | {cm[0][1]} |
 | True: emergency | {cm[1][0]} | {cm[1][1]} |
 
+## Training behavior (honesty note)
+
+Full per-epoch history is in `results/training_log.json`. With only ~205
+training images and a ~1.1M-parameter CNN, training accuracy climbs past
+90% within ~20-30 epochs while validation accuracy plateaus/oscillates in
+the 0.44-0.68 range — classic overfitting on a small dataset. The checkpoint
+above was selected as the epoch with the best validation F1 (not simply the
+final epoch), which is why it comes from partway through training rather
+than the end.
+
 ## Comparison to the original coursework project
 
 The original LinkedIn-described project reported **81.85% test accuracy**,
 trained on a Kaggle dataset using a T4/P100 GPU. This rebuild measured
 **{metrics.accuracy*100:.2f}% accuracy** on a much smaller, CPU-feasible
 Wikimedia-sourced dataset ({len(test_ds)} test images vs. a presumably much
-larger Kaggle set) at {image_size}x{image_size} resolution. See the README
-Limitations section for an honest discussion of why these numbers differ and
-why that is expected, not a discrepancy to be hidden.
+larger Kaggle set) at {image_size}x{image_size} resolution. The gap is
+attributable to: (1) a ~150x smaller dataset (293 total images here vs. a
+typical Kaggle emergency-vehicle dataset in the thousands), (2) images
+pulled from heterogeneous real-world Commons photos rather than a
+purpose-curated Kaggle set, (3) lower resolution and a narrower network
+sized to avoid immediately memorizing ~205 training images, and (4) no GPU,
+which bounded how much architecture/hyperparameter search was practical.
+See the README Limitations section for further discussion — this delta is
+expected, not a discrepancy to be hidden.
 """
     out_md = Path(args.out_md)
     with open(out_md, "w", encoding="utf-8") as f:

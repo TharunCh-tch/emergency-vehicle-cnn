@@ -20,7 +20,10 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple[EmergencyVeh
     ckpt = torch.load(checkpoint_path, map_location=device)
     image_size = ckpt.get("image_size", 128)
     model = EmergencyVehicleCNN(
-        num_classes=2, image_size=image_size, dropout=ckpt.get("dropout", 0.4)
+        num_classes=2,
+        image_size=image_size,
+        dropout=ckpt.get("dropout", 0.4),
+        base_channels=ckpt.get("base_channels", 16),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()

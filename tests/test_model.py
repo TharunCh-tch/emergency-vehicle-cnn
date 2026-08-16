@@ -29,7 +29,15 @@ def test_features_output_channels():
     model = EmergencyVehicleCNN(num_classes=2, image_size=128)
     x = torch.randn(2, 3, 128, 128)
     feats = model.features(x)
-    # 4 conv blocks each halve spatial dims: 128 -> 8, final channel depth 256
+    # 4 conv blocks each halve spatial dims: 128 -> 8, final channel depth
+    # is base_channels * 8 (default base_channels=16 -> 128)
+    assert feats.shape == (2, 128, 8, 8)
+
+
+def test_features_output_channels_custom_base_channels():
+    model = EmergencyVehicleCNN(num_classes=2, image_size=128, base_channels=32)
+    x = torch.randn(2, 3, 128, 128)
+    feats = model.features(x)
     assert feats.shape == (2, 256, 8, 8)
 
 
